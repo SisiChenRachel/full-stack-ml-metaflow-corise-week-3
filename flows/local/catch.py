@@ -16,6 +16,9 @@ class CatchDivideByZeroFlow(FlowSpec):
 
     @step
     def join(self, inputs):
+        print(inputs)
+        for inp in inputs:
+            print(inp)
         self.results = [inp.res for inp in inputs if not inp.divide_failed]
         print("results", self.results)
         self.next(self.end)

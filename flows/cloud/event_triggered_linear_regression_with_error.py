@@ -1,4 +1,4 @@
-from metaflow import FlowSpec, step, card, conda_base, current, Parameter, Flow, trigger
+from metaflow import FlowSpec, step, card, conda_base, current, Parameter, Flow, trigger,retry, catch
 from metaflow.cards import Markdown, Table, Image, Artifact
 
 URL = "https://outerbounds-datasets.s3.us-west-2.amazonaws.com/taxi/latest.parquet"
@@ -35,6 +35,7 @@ class TaxiFarePrediction(FlowSpec):
             df = df[f]
         return df
 
+  
     @step
     def start(self):
         import pandas as pd
@@ -45,80 +46,50 @@ class TaxiFarePrediction(FlowSpec):
         # NOTE: we are split into training and validation set in the validation step which uses cross_val_score.
         # This is a simple/naive way to do this, and is meant to keep this example simple, to focus learning on deploying Metaflow flows.
         # In practice, you want split time series data in more sophisticated ways and run backtests.
-        self.X = self.df["trip_distance"].values.reshape(-1, 1)
-        self.y = self.df["total_amount"].values
-        self.next(self.linear_model)
+        n = self.df.shape[0]
+        self.params = [5, 100, n]
+        
+        self.next(self.linear_model_compute, foreach='params')
 
+
+    @card(type="corise")
+    @catch(var='compute_failed')
     @step
-    def linear_model(self):
+    def linear_model_compute(self):
         "Fit a single variable, linear model to the data."
         from sklearn.linear_model import LinearRegression
 
         # TODO: Play around with the model if you are feeling it.
         self.model = LinearRegression(copy_X=False,
                                         fit_intercept=False,
-                                        n_jobs=-1)
+                                        n_jobs=-1,
+                                        positive=True)
 
-        self.next(self.validate)
+                            
 
-    def gather_sibling_flow_run_results(self):
-        # storage to populate and feed to a Table in a Metaflow card
-        rows = []
+        self.y = self.df["total_amount"].values
+        self.sample_size = self.input
+        self.X = self.df["trip_distance"].head(self.sample_size).values.reshape(-1, 1)
 
-        # loop through runs of this flow
-        for run in Flow(self.__class__.__name__):
-            if run.id != current.run_id:
-                if run.successful:
-                    icon = "✅"
-                    msg = "OK"
-                    score = str(self.scores.mean())
-                else:
-                    icon = "❌"
-                    msg = "Error"
-                    score = "NA"
-                    for step in run:
-                        for task in step:
-                            if not task.successful:
-                                msg = task.stderr
-                row = [
-                    Markdown(icon),
-                    Artifact(run.id),
-                    Artifact(run.created_at.strftime(DATETIME_FORMAT)),
-                    Artifact(score),
-                    Markdown(msg),
-                ]
-                rows.append(row)
-            else:
-                rows.append(
-                    [
-                        Markdown("✅"),
-                        Artifact(run.id),
-                        Artifact(run.created_at.strftime(DATETIME_FORMAT)),
-                        Artifact(str(self.scores.mean())),
-                        Markdown("This run..."),
-                    ]
-                )
-        return rows
 
-    @card(type="corise")
-    @step
-    def validate(self):
         from sklearn.model_selection import cross_val_score
 
         self.scores = cross_val_score(self.model, self.X, self.y, cv=5)
-        current.card.append(Markdown("# Taxi Fare Prediction Results"))
-        current.card.append(
-            Table(
-                self.gather_sibling_flow_run_results(),
-                headers=["Pass/fail", "Run ID", "Created At", "R^2 score", "Stderr"],
-            )
-        )
+        current.card.append(Markdown("Accuracy: %0.2f (+/- %0.2f)" % (self.scores.mean(), self.scores.std() * 2)))
+        
+        self.next(self.join)
+
+    @step
+    def join(self, inputs):
+        for input in inputs:
+            if input.compute_failed:
+                 print('compute failed for parameter: %d' % input.sample_size)
         self.next(self.end)
 
     @step
     def end(self):
         print("Success!")
 
-
 if __name__ == "__main__":
     TaxiFarePrediction()
+
